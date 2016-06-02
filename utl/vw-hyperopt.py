@@ -73,6 +73,7 @@ class HyperoptSpaceConstructor(object):
             distr_part = ''
         range_part = self.range_pattern.findall(value)[0]
         is_continuous = '..' in range_part
+        is_quadratic = arg.startswith('-q#')
 
         ocd = self.only_continuous.findall(value)
         if not is_continuous and len(ocd)> 0 and ocd[0] != '':
@@ -80,7 +81,7 @@ class HyperoptSpaceConstructor(object):
                               "uniform or log-uniform distribution. "
                               "Please, use [min..max]%s form") % (distr_part))
 
-        if is_continuous and arg == '-q':
+        if is_continuous and is_quadratic:
             raise ValueError(("You must directly specify namespaces for quadratic features "
                               "as a list of values, not as a parametric distribution"))
 
@@ -104,7 +105,7 @@ class HyperoptSpaceConstructor(object):
                 raise ValueError("Cannot recognize distribution: %s" % (distr_part))
         else:
             possible_values = range_part.split(',')
-            if arg == '-q':
+            if is_quadratic:
                 possible_values = [v.replace('+', ' -q ') for v in possible_values]
             distrib = hp.choice(hp_choice_name, possible_values)
 
@@ -136,17 +137,21 @@ class HyperoptSpaceConstructor(object):
                 break
 
         self.space = {algo: {'type': algo, 'argument': self.algorithm_metadata[algo]['arg']} for algo in algorithms}
+        count = 0
         for algo in algorithms:
             for arg in line:
+                count += 1
                 arg, value = arg.split('=')
                 if arg == '--algorithms':
                     continue
                 if arg not in self.algorithm_metadata[algo]['prohibited_flags']:
+                    arg = '%s#%i' % (arg, count)
                     distrib = self._process_vw_argument(arg, value, algo)
                     self.space[algo][arg] = distrib
                 else:
                     pass
         self.space = hp.choice('algorithm', self.space.values())
+        #print 'Space: ', self.space
 
 class HyperOptimizer(object):
     def __init__(self, train_set, holdout_set, command, max_evals=100,
@@ -203,18 +208,17 @@ class HyperOptimizer(object):
         return logger
 
     def get_hyperparam_string(self, **kwargs):
-        for arg in ['--passes']: #, '--rank', '--lrq']:
-            if arg in kwargs:
-                kwargs[arg] = int(kwargs[arg])
-
         #print 'KWARGS: ', kwargs
-        flags = [key for key in kwargs if key.startswith('-')]
-        for flag in flags:
-            if kwargs[flag] == 'omit':
-                del kwargs[flag]
-
-        self.param_suffix = ' '.join(['%s %s' % (key, kwargs[key]) for key in kwargs if key.startswith('-')])
-        self.param_suffix += ' %s' % (kwargs['argument'])
+        args = []
+        for key in kwargs:
+            value = kwargs[key]
+            key = key.split('#')[0]
+            if key.startswith('-') and value != 'omit':
+                if key in ['--passes']: #, '--rank', '--lrq']:
+                    value = int(value)
+                args.append(key)
+                args.append(value)
+        self.param_suffix = ' '.join(args) + ' ' + (kwargs['argument'])
 
     def compose_vw_train_command(self):
         data_part = ('vw -d %s -f %s --holdout_off -c '
