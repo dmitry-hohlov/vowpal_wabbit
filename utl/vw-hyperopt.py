@@ -11,7 +11,7 @@ from hyperopt import hp, fmin, tpe, rand, Trials, STATUS_OK
 from sklearn.metrics import roc_curve, auc, log_loss, precision_recall_curve
 import numpy as np
 from datetime import datetime as dt
-import subprocess, shlex
+import subprocess, shlex, os
 from math import exp, log
 import argparse
 import re
@@ -298,7 +298,8 @@ class HyperOptimizer(object):
             self.logger.info("evaluation time for this step: %s" % str(elapsed))
 
             # clean up
-            subprocess.call(shlex.split('rm %s %s' % (self.train_model, self.holdout_pred)))
+            os.remove(self.train_model)
+            os.remove(self.holdout_pred)
 
             to_return = {'status': STATUS_OK,
                          'loss': loss,  # TODO: include also train loss tracking in order to prevent overfitting
