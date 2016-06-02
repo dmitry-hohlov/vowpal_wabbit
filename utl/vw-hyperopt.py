@@ -182,6 +182,7 @@ class HyperOptimizer(object):
         self.searcher = searcher
         self.is_regression = is_regression
 
+        self.cache = {}
         self.trials = Trials()
         self.current_trial = 0
 
@@ -210,7 +211,7 @@ class HyperOptimizer(object):
     def get_hyperparam_string(self, **kwargs):
         #print 'KWARGS: ', kwargs
         args = []
-        for key in kwargs:
+        for key in sorted(kwargs.keys()):
             value = kwargs[key]
             key = key.split('#')[0]
             if key.startswith('-') and value != 'omit':
@@ -293,17 +294,22 @@ class HyperOptimizer(object):
             self.current_trial += 1
             self.logger.info('\n\nStarting trial no.%d' % self.current_trial)
             self.get_hyperparam_string(**kwargs)
-            self.fit_vw()
-            self.validate_vw()
-            loss = self.validation_metric_vw()
+
+            loss = 0.0
+            if self.param_suffix in self.cache:
+                loss = self.cache[self.param_suffix]
+                self.logger.info('Found cached loss value: %.6f' % loss)
+            else:
+                self.fit_vw()
+                self.validate_vw()
+                loss = self.validation_metric_vw()
+                self.cache[self.param_suffix] = loss
+                os.remove(self.train_model)
+                os.remove(self.holdout_pred)
 
             finish = dt.now()
             elapsed = finish - start
             self.logger.info("evaluation time for this step: %s" % str(elapsed))
-
-            # clean up
-            os.remove(self.train_model)
-            os.remove(self.holdout_pred)
 
             to_return = {'status': STATUS_OK,
                          'loss': loss,  # TODO: include also train loss tracking in order to prevent overfitting
