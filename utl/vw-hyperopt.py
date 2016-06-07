@@ -218,7 +218,7 @@ class HyperOptimizer(object):
                 if key in ['--passes']: #, '--rank', '--lrq']:
                     value = int(value)
                 args.append(key)
-                args.append(value)
+                args.append(str(value))
         self.param_suffix = ' '.join(args) + ' ' + (kwargs['argument'])
 
     def compose_vw_train_command(self):
