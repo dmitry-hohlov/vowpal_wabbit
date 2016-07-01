@@ -34,7 +34,7 @@ def read_arguments():
     parser.add_argument('--max_evals', type=int, default=100)
     parser.add_argument('--train', type=str, required=True, help="training set")
     parser.add_argument('--holdout', type=str, required=True, help="holdout set")
-    parser.add_argument('--vw_space', type=str, required=True, help="hyperparameter search space (must be 'quoted')")
+    parser.add_argument('--vw_space', type=str, required=True, help="hyperopt search space (must be 'quoted')")
     parser.add_argument('--outer_loss_function', default='logistic',
                         choices=['logistic', 'roc-auc'])  # TODO: implement squared, hinge, quantile, PR-auc
     parser.add_argument('--regression', action='store_true', default=False, help="""regression (continuous class labels)
@@ -42,6 +42,8 @@ def read_arguments():
     parser.add_argument('--plot', action='store_true', default=False, help=("Plot the results in the end. "
                                                                             "Requires matplotlib and "
                                                                             "(optionally) seaborn to be installed."))
+    parser.add_argument('--stepwise', type=str, metavar='ALL_NAMESPACES+INITIAL_NAMESPACES',
+                        help="Turns on bidirectional stepwise feature selection.")
     args = parser.parse_args()
     return args
 
@@ -156,7 +158,7 @@ class HyperoptSpaceConstructor(object):
 class HyperOptimizer(object):
     def __init__(self, train_set, holdout_set, command, max_evals=100,
                  outer_loss_function='logistic',
-                 searcher='tpe', is_regression=False):
+                 searcher='tpe', is_regression=False, stepwise=None):
         self.train_set = train_set
         self.holdout_set = holdout_set
 
@@ -171,6 +173,7 @@ class HyperOptimizer(object):
         # hyperopt parameter sample, converted into a string with flags
         self.param_suffix = None
         self.validation_param_suffix = None
+        self.stepwise_param_suffix = ''
         self.train_command = None
         self.validate_command = None
 
@@ -183,9 +186,33 @@ class HyperOptimizer(object):
         self.searcher = searcher
         self.is_regression = is_regression
 
+        self.hyperopt_best_loss = None
+        self.hyperopt_best_train_command = None
+        self.hyperopt_best_param_suffix = None
+        self.hyperopt_best_validation_param_suffix = None
+
+        self.is_stepwise = stepwise is not None
+        if self.is_stepwise:
+            self.trials_output_dir = './trials'
+            namespaces = stepwise.split('+')
+            if len(namespaces) > 2:
+                raise ValueError("You can not specify more than one plus sign in --stepwise")
+            if namespaces[0] == '':
+                raise ValueError("ALL_NAMESPACES can not be empty in --stepwise")
+            self.all_namespaces = set(namespaces[0])
+            self.current_namespaces = set(namespaces[1]) if len(namespaces) > 1 else set()
+            if not self.current_namespaces.issubset(self.all_namespaces):
+                raise ValueError("INITIAL_NAMESPACES must be a subset of ALL_NAMESPACES in --stepwise")
+            self.stepwise_path = ''.join(sorted(self.current_namespaces))
+            self.stepwise_best_loss = None
+            self.stepwise_best_train_command = None
+            self.stepwise_best_namespaces = None
+            self.stepwise_best_path = None
+            self.current_step = 0
+
         self.cache = {}
-        self.trials = Trials()
-        self.current_trial = 0
+        self.trials = None
+        self.current_trial = None
 
     def _get_space(self, command):
         hs = HyperoptSpaceConstructor(command)
@@ -209,7 +236,7 @@ class HyperOptimizer(object):
         logger.addHandler(file_handler)
         return logger
 
-    def get_hyperparam_string(self, **kwargs):
+    def compose_hyperopt_param_suffix(self, **kwargs):
         #print 'KWARGS: ', kwargs
         args = []
         validation_args = []
@@ -228,23 +255,26 @@ class HyperOptimizer(object):
         self.param_suffix = ' '.join(args) + ' ' + (kwargs['argument'])
         self.validation_param_suffix = ' '.join(validation_args)
 
+    def compose_stepwise_param_suffix(self):
+        self.stepwise_param_suffix = '--keep ' + ''.join(sorted(self.current_namespaces)) \
+            if len(self.current_namespaces) > 0 \
+            else ''
+
     def compose_vw_train_command(self):
         data_part = ('vw -d %s -f %s --holdout_off -c '
                      % (self.train_set, self.train_model))
-        self.train_command = ' '.join([data_part, self.param_suffix])
+        self.train_command = ' '.join([data_part, self.param_suffix, self.stepwise_param_suffix])
 
     def compose_vw_validate_command(self):
         data_part = 'vw -t -d %s -i %s -p %s --holdout_off -c' \
                     % (self.holdout_set, self.train_model, self.holdout_pred)
-        self.validate_command = ' '.join([data_part, self.validation_param_suffix])
+        self.validate_command = ' '.join([data_part, self.validation_param_suffix, self.stepwise_param_suffix])
 
     def fit_vw(self):
-        self.compose_vw_train_command()
         self.logger.info("executing the following command (training): %s" % self.train_command)
         subprocess.call(shlex.split(self.train_command))
 
     def validate_vw(self):
-        self.compose_vw_validate_command()
         self.logger.info("executing the following command (validation): %s" % self.validate_command)
         subprocess.call(shlex.split(self.validate_command))
 
@@ -289,62 +319,151 @@ class HyperOptimizer(object):
             fpr, tpr, _ = roc_curve(self.y_true_holdout, y_pred_holdout_proba)
             loss = -auc(fpr, tpr)
 
-        self.logger.info('parameter suffix: %s' % self.param_suffix)
+        self.logger.info('parameter suffix: %s' % ' '.join([self.param_suffix, self.stepwise_param_suffix]))
         self.logger.info('loss value: %.6f' % loss)
 
         return loss
 
-    def hyperopt_search(self, parallel=False):  # TODO: implement parallel search with MongoTrials
-        def objective(kwargs):
-            start = dt.now()
+    def run_trial(self):
+        start = dt.now()
+        self.current_trial += 1
+        message = '\n\nStarting trial no.%d' % self.current_trial
+        if self.is_stepwise:
+            message += '\nstepwise status: step no.%d, %d namespace(s), %s' \
+                % (self.current_step, len(self.current_namespaces), self.stepwise_path)
+        self.logger.info(message)
 
-            self.current_trial += 1
-            self.logger.info('\n\nStarting trial no.%d' % self.current_trial)
-            self.get_hyperparam_string(**kwargs)
+        self.compose_vw_train_command()
+        self.compose_vw_validate_command()
 
-            loss = 0.0
-            if self.param_suffix in self.cache:
-                loss = self.cache[self.param_suffix]
-                self.logger.info('Found cached loss value: %.6f' % loss)
-            else:
-                self.fit_vw()
-                self.validate_vw()
-                loss = self.validation_metric_vw()
-                self.cache[self.param_suffix] = loss
-                os.remove(self.train_model)
-                os.remove(self.holdout_pred)
+        if self.train_command in self.cache:
+            loss = self.cache[self.train_command]
+            self.logger.info('found cached loss value: %.6f' % loss)
+        else:
+            self.fit_vw()
+            self.validate_vw()
+            loss = self.validation_metric_vw()
+            self.cache[self.train_command] = loss
+            os.remove(self.train_model)
+            os.remove(self.holdout_pred)
 
-            finish = dt.now()
-            elapsed = finish - start
-            self.logger.info("evaluation time for this step: %s" % str(elapsed))
+        finish = dt.now()
+        elapsed = finish - start
+        self.logger.info("evaluation time for this step: %s" % str(elapsed))
 
-            to_return = {'status': STATUS_OK,
-                         'loss': loss,  # TODO: include also train loss tracking in order to prevent overfitting
-                         'eval_time': elapsed.seconds,
-                         'train_command': self.train_command,
-                         'current_trial': self.current_trial
+        return {
+            'status': STATUS_OK,
+            'loss': loss,  # TODO: include also train loss tracking in order to prevent overfitting
+            'eval_time': elapsed.seconds,
+            'train_command': self.train_command,
+            'current_trial': self.current_trial,
             }
-            return to_return
 
-        self.trials = Trials()
+    def optimize(self, parallel=False):  # TODO: implement parallel search with MongoTrials
+        def hyperopt_trial(kwargs):
+            self.compose_hyperopt_param_suffix(**kwargs)
+            result = self.run_trial()
+            if self.current_trial == 1 or result['loss'] < self.hyperopt_best_loss:
+                self.hyperopt_best_loss = result['loss']
+                self.hyperopt_best_train_command = self.train_command
+                self.hyperopt_best_param_suffix = self.param_suffix
+                self.hyperopt_best_validation_param_suffix = self.validation_param_suffix
+            return result
+
+        def stepwise_trial(results):
+            self.compose_stepwise_param_suffix()
+            result = self.run_trial()
+            if self.current_trial == 1 or result['loss'] < self.stepwise_best_loss:
+                self.stepwise_best_loss = result['loss']
+                self.stepwise_best_train_command = self.train_command
+                self.stepwise_best_namespaces = self.current_namespaces.copy()
+                self.stepwise_best_path = self.stepwise_path
+            self.logger.info("Stepwise feature selection completed %d trials with best loss: %.6f" % (self.current_trial, self.stepwise_best_loss))
+            results.append(result)
+
+        def search_namespaces(results):
+            path = self.stepwise_path
+            if len(self.current_namespaces) > 1:
+                for namespace in self.current_namespaces.copy():
+                    self.current_namespaces.remove(namespace)
+                    self.stepwise_path = ''.join([path, '-', namespace, '*'])
+                    stepwise_trial(results)
+                    self.current_namespaces.add(namespace)
+            if len(self.current_namespaces) < len(self.all_namespaces):
+                for namespace in self.all_namespaces - self.current_namespaces:
+                    self.current_namespaces.add(namespace)
+                    self.stepwise_path = ''.join([path, '+', namespace, '*'])
+                    stepwise_trial(results)
+                    self.current_namespaces.remove(namespace)
+            self.stepwise_path = path
+
         if self.searcher == 'tpe':
             algo = tpe.suggest
         elif self.searcher == 'rand':
             algo = rand.suggest
 
-        logging.debug("starting hypersearch...")
-        best_params = fmin(objective, space=self.space, trials=self.trials, algo=algo, max_evals=self.max_evals)
-        self.logger.debug("the best hyperopt parameters: %s" % str(best_params))
+        logging.debug("starting hyperparameter optimization" 
+            + (" with bidirectional stepwise feature selection" if self.is_stepwise else "") + "...")
 
-        json.dump(self.trials.results, open(self.trials_output, 'w'))
-        self.logger.info('All the trials results are saved at %s' % self.trials_output)
+        if self.is_stepwise:
+            os.makedirs(self.trials_output_dir)
 
-        best_configuration = self.trials.results[np.argmin(self.trials.losses())]['train_command']
-        best_loss = self.trials.results[np.argmin(self.trials.losses())]['loss']
-        self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % best_configuration)
-        self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % best_loss)
+        while True:
+            if self.is_stepwise:
+                self.current_step += 1
+                self.trials_output = '%s/%04d-hyperopt.json' % (self.trials_output_dir, self.current_step)
+                self.compose_stepwise_param_suffix()
 
-        return best_configuration, best_loss
+            self.trials = Trials()
+            self.current_trial = 0
+            best_params = fmin(hyperopt_trial, space=self.space, trials=self.trials, algo=algo, max_evals=self.max_evals)
+            self.logger.debug("the best hyperopt parameters: %s" % str(best_params))
+
+            json.dump(self.trials.results, open(self.trials_output, 'w'))
+            self.logger.info('All the trials results are saved at %s' % self.trials_output)
+
+            self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % self.hyperopt_best_train_command)
+            self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % self.hyperopt_best_loss)
+
+            if not self.is_stepwise:
+                break
+
+            if self.current_step == 1 or self.hyperopt_best_loss < total_best_loss:
+                total_best_loss = self.hyperopt_best_loss
+                total_best_train_command = self.hyperopt_best_train_command
+                total_best_param_suffix = self.hyperopt_best_param_suffix
+                total_best_validation_param_suffix = self.hyperopt_best_validation_param_suffix
+            else:
+                self.logger.info("Hyperopt didn't found better parameters on this step! Using previous ones")
+
+            self.trials_output = '%s/%04d-stepwise.json' % (self.trials_output_dir, self.current_step)
+            self.param_suffix = total_best_param_suffix
+            self.validation_param_suffix = total_best_validation_param_suffix
+
+            results = []
+            self.current_trial = 0
+            search_namespaces(results)
+            self.logger.debug("the best namespaces: %s" % ''.join(sorted(self.stepwise_best_namespaces)))
+
+            json.dump(results, open(self.trials_output, 'w'))
+            self.logger.info('All the trials results are saved at %s' % self.trials_output)
+
+            self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % self.stepwise_best_train_command)
+            self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % self.stepwise_best_loss)
+
+            if self.stepwise_best_loss < self.hyperopt_best_loss:
+                total_best_loss = self.stepwise_best_loss
+                total_best_train_command = self.stepwise_best_train_command
+                self.current_namespaces = self.stepwise_best_namespaces.copy()
+                self.stepwise_path = self.stepwise_best_path.rstrip('*')
+            else:
+                break
+
+        if self.is_stepwise:
+            self.logger.info("\n\nStepwise feature selection completed\n\n")
+            self.logger.info("\n\nFeature selection path: %s\n\n" % self.stepwise_path)
+            self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % total_best_train_command)
+            self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % total_best_loss)
 
     def plot_progress(self):
         try:
@@ -383,9 +502,10 @@ def main():
     h = HyperOptimizer(train_set=args.train, holdout_set=args.holdout, command=args.vw_space,
                        max_evals=args.max_evals,
                        outer_loss_function=args.outer_loss_function,
-                       searcher=args.searcher, is_regression=args.regression)
+                       searcher=args.searcher, is_regression=args.regression,
+                       stepwise = args.stepwise)
     h.get_y_true_holdout()
-    h.hyperopt_search()
+    h.optimize()
     if args.plot:
         h.plot_progress()
 
