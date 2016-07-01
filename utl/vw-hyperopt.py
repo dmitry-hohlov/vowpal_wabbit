@@ -170,6 +170,7 @@ class HyperOptimizer(object):
 
         # hyperopt parameter sample, converted into a string with flags
         self.param_suffix = None
+        self.validation_param_suffix = None
         self.train_command = None
         self.validate_command = None
 
@@ -211,15 +212,21 @@ class HyperOptimizer(object):
     def get_hyperparam_string(self, **kwargs):
         #print 'KWARGS: ', kwargs
         args = []
+        validation_args = []
         for key in sorted(kwargs.keys()):
             value = kwargs[key]
             key = key.split('#')[0]
             if key.startswith('-') and value != 'omit':
                 if key in ['--passes']: #, '--rank', '--lrq']:
                     value = int(value)
+                value = str(value)
                 args.append(key)
-                args.append(str(value))
+                args.append(value)
+                if key in ['--keep', '--ignore']:
+                    validation_args.append(key)
+                    validation_args.append(value)
         self.param_suffix = ' '.join(args) + ' ' + (kwargs['argument'])
+        self.validation_param_suffix = ' '.join(validation_args)
 
     def compose_vw_train_command(self):
         data_part = ('vw -d %s -f %s --holdout_off -c '
@@ -229,7 +236,7 @@ class HyperOptimizer(object):
     def compose_vw_validate_command(self):
         data_part = 'vw -t -d %s -i %s -p %s --holdout_off -c' \
                     % (self.holdout_set, self.train_model, self.holdout_pred)
-        self.validate_command = data_part
+        self.validate_command = ' '.join([data_part, self.validation_param_suffix])
 
     def fit_vw(self):
         self.compose_vw_train_command()
