@@ -213,6 +213,7 @@ class HyperOptimizer(object):
         self.cache = {}
         self.trials = None
         self.current_trial = None
+        self.total_best_loss = None
 
     def _get_space(self, command):
         hs = HyperoptSpaceConstructor(command)
@@ -331,6 +332,8 @@ class HyperOptimizer(object):
         if self.is_stepwise:
             message += '\nstepwise status: step no.%d, %d namespace(s), %s' \
                 % (self.current_step, len(self.current_namespaces), self.stepwise_path)
+            if self.total_best_loss is not None:
+                message += '\nbest loss so far (not considering current trials): %.6f' % self.total_best_loss
         self.logger.info(message)
 
         self.compose_vw_train_command()
@@ -428,8 +431,8 @@ class HyperOptimizer(object):
             if not self.is_stepwise:
                 break
 
-            if self.current_step == 1 or self.hyperopt_best_loss < total_best_loss:
-                total_best_loss = self.hyperopt_best_loss
+            if self.current_step == 1 or self.hyperopt_best_loss < self.total_best_loss:
+                self.total_best_loss = self.hyperopt_best_loss
                 total_best_train_command = self.hyperopt_best_train_command
                 total_best_param_suffix = self.hyperopt_best_param_suffix
                 total_best_validation_param_suffix = self.hyperopt_best_validation_param_suffix
@@ -452,7 +455,7 @@ class HyperOptimizer(object):
             self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % self.stepwise_best_loss)
 
             if self.stepwise_best_loss < self.hyperopt_best_loss:
-                total_best_loss = self.stepwise_best_loss
+                self.total_best_loss = self.stepwise_best_loss
                 total_best_train_command = self.stepwise_best_train_command
                 self.current_namespaces = self.stepwise_best_namespaces.copy()
                 self.stepwise_path = self.stepwise_best_path.rstrip('*')
@@ -463,7 +466,7 @@ class HyperOptimizer(object):
             self.logger.info("\n\nStepwise feature selection completed\n\n")
             self.logger.info("\n\nFeature selection path: %s\n\n" % self.stepwise_path)
             self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % total_best_train_command)
-            self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % total_best_loss)
+            self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % self.total_best_loss)
 
     def plot_progress(self):
         try:
