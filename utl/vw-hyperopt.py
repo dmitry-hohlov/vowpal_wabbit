@@ -200,7 +200,7 @@ class HyperOptimizer(object):
             if namespaces[0] == '':
                 raise ValueError("ALL_NAMESPACES can not be empty in --stepwise")
             self.all_namespaces = set(namespaces[0])
-            self.current_namespaces = set(namespaces[1]) if len(namespaces) > 1 else set()
+            self.current_namespaces = set(namespaces[1])
             if not self.current_namespaces.issubset(self.all_namespaces):
                 raise ValueError("INITIAL_NAMESPACES must be a subset of ALL_NAMESPACES in --stepwise")
             self.stepwise_path = ''.join(sorted(self.current_namespaces))
