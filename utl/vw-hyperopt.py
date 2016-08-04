@@ -259,7 +259,7 @@ class HyperOptimizer(object):
     def compose_stepwise_param_suffix(self):
         self.stepwise_param_suffix = '--keep ' + ''.join(sorted(self.current_namespaces)) \
             if len(self.current_namespaces) > 0 \
-            else ''
+            else '--keep \\\\xFF'
 
     def compose_vw_train_command(self):
         data_part = ('vw -d %s -f %s --holdout_off -c '
