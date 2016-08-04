@@ -454,7 +454,7 @@ class HyperOptimizer(object):
             self.logger.info("\n\nA full training command with the best hyperparameters: \n%s\n\n" % self.stepwise_best_train_command)
             self.logger.info("\n\nThe best holdout loss value: \n%s\n\n" % self.stepwise_best_loss)
 
-            if self.stepwise_best_loss < self.hyperopt_best_loss:
+            if self.stepwise_best_loss <= self.hyperopt_best_loss:
                 self.total_best_loss = self.stepwise_best_loss
                 total_best_train_command = self.stepwise_best_train_command
                 self.current_namespaces = self.stepwise_best_namespaces.copy()
